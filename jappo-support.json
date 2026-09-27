@@ -1,0 +1,353 @@
+{
+  "name": "JAPPO — Assistance Client IA V2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "jappo-support",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "1",
+      "name": "Webhook — Demande client",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1000,
+        0
+      ],
+      "webhookId": "jappo-support"
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $json.body?.email || $json.email || '';\nconst message = $json.body?.message || $json.message || '';\n\nconst cleanEmail = String(email).trim().toLowerCase();\nconst cleanMessage = String(message).trim();\n\nif (!cleanEmail) {\n  throw new Error('Email obligatoire.');\n}\n\nif (!cleanMessage) {\n  throw new Error('Message obligatoire.');\n}\n\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\nif (!emailRegex.test(cleanEmail)) {\n  throw new Error('Adresse email invalide.');\n}\n\nconst ticketId = `JAPPO-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}`;\n\nreturn [{\n  json: {\n    email: cleanEmail,\n    message: cleanMessage,\n    ticketId,\n    receivedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "2",
+      "name": "Préparer + Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer REMPLACE_PAR_TA_CLE_OPENROUTER"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "HTTP-Referer",
+              "value": "http://localhost:5678"
+            },
+            {
+              "name": "X-Title",
+              "value": "JAPPO Support IA"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={\n  \"model\": \"openai/gpt-4o-mini\",\n  \"temperature\": 0.1,\n  \"response_format\": {\n    \"type\": \"json_object\"\n  },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Tu es l'assistant du service client de JAPPO, une plateforme SaaS de gestion et d'accompagnement des incubateurs, structures d'accompagnement et entrepreneurs. Tu dois analyser une demande client et retourner UNIQUEMENT un JSON valide. Ne jamais inventer une fonctionnalité, un prix, un statut de compte, un paiement ou une information qui n'est pas connue. Les demandes concernant paiement, remboursement, sécurité, compte bloqué, données perdues, bug technique ou problème nécessitant une vérification doivent être considérées comme nécessitant un humain. Les questions simples concernant connexion, inscription, mot de passe, cohortes, projets, missions, réunions, ressources et utilisation générale peuvent être résolues automatiquement si la procédure est suffisamment claire. Langue: français. Réponse courte, claire et professionnelle. Catégories autorisées: connexion, inscription, mot_de_passe, cohorte, projet, mission, reunion, ressource, abonnement, paiement, remboursement, securite, bug, autre. Priorités autorisées: LOW, MEDIUM, HIGH. Retourne exactement les champs: category, priority, resolved, needsHuman, response, reason. resolved doit être true uniquement si la demande peut être résolue sans intervention humaine. needsHuman doit être true pour paiement, remboursement, sécurité, bug, compte bloqué, données perdues ou toute demande nécessitant une vérification.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Ticket: {{$json.ticketId}}\\nEmail client: {{$json.email}}\\nDemande client: {{$json.message}}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "3",
+      "name": "OpenRouter — Support IA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $('Préparer + Ticket').item.json;\n\nconst content = $json.choices?.[0]?.message?.content;\n\nif (!content) {\n  throw new Error('Réponse OpenRouter vide ou invalide.');\n}\n\nlet ai;\n\ntry {\n  ai = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (error) {\n  throw new Error(`Impossible de parser la réponse IA : ${content}`);\n}\n\nreturn [{\n  json: {\n    ticketId: original.ticketId,\n    email: original.email,\n    message: original.message,\n    receivedAt: original.receivedAt,\n    category: ai.category || 'autre',\n    priority: ai.priority || 'MEDIUM',\n    resolved: Boolean(ai.resolved),\n    needsHuman: Boolean(ai.needsHuman),\n    response: ai.response || '',\n    reason: ai.reason || ''\n  }\n}];"
+      },
+      "id": "4",
+      "name": "Interpréter la réponse IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\n\nconst forcedHumanCategories = [\n  'paiement',\n  'remboursement',\n  'securite',\n  'bug'\n];\n\nconst forcedHuman = forcedHumanCategories.includes(data.category);\n\nconst needsHuman = forcedHuman || data.needsHuman || !data.resolved;\n\nlet priority = data.priority;\n\nif (forcedHuman && priority === 'LOW') {\n  priority = 'HIGH';\n}\n\nif (data.category === 'paiement' || data.category === 'remboursement' || data.category === 'securite') {\n  priority = 'HIGH';\n}\n\nreturn [{\n  json: {\n    ...data,\n    priority,\n    needsHuman,\n    status: needsHuman ? 'OPEN' : 'RESOLVED'\n  }\n}];"
+      },
+      "id": "5",
+      "name": "Décision Support",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        20,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "human-condition",
+              "leftValue": "={{ $json.needsHuman }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6",
+      "name": "Besoin humain ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Décision Support').item.json.email }}",
+        "subject": "JAPPO — Votre demande a été transmise au support",
+        "emailType": "text",
+        "message": "=Bonjour,\n\nNous avons bien reçu votre demande.\n\nVotre demande nécessite une vérification par notre équipe support et a été transmise à notre équipe.\n\nRéférence : {{ $('Décision Support').item.json.ticketId }}\n\nCatégorie : {{ $('Décision Support').item.json.category }}\n\nPriorité : {{ $('Décision Support').item.json.priority }}\n\nNous reviendrons vers vous dès que possible.\n\nCordialement,\nL'équipe JAPPO"
+      },
+      "id": "7",
+      "name": "Email — Confirmation client",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        520,
+        -140
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "support@jappo.sn",
+        "subject": "=🚨 JAPPO — {{ $('Décision Support').item.json.priority }} — {{ $('Décision Support').item.json.category }} — {{ $('Décision Support').item.json.ticketId }}",
+        "emailType": "text",
+        "message": "=Nouvelle demande client nécessitant une intervention humaine.\n\n════════════════════════════════\nTICKET\n════════════════════════════════\nRéférence : {{ $('Décision Support').item.json.ticketId }}\nStatut : OPEN\nPriorité : {{ $('Décision Support').item.json.priority }}\nCatégorie : {{ $('Décision Support').item.json.category }}\n\n════════════════════════════════\nCLIENT\n════════════════════════════════\nEmail : {{ $('Décision Support').item.json.email }}\n\n════════════════════════════════\nDEMANDE\n════════════════════════════════\n{{ $('Décision Support').item.json.message }}\n\n════════════════════════════════\nANALYSE IA\n════════════════════════════════\nRaison : {{ $('Décision Support').item.json.reason }}\n\nRéponse IA proposée :\n{{ $('Décision Support').item.json.response }}\n\n— Service client JAPPO"
+      },
+      "id": "8",
+      "name": "Email — Support JAPPO",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        780,
+        -140
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"status\": \"OPEN\",\n  \"ticketId\": \"{{ $('Décision Support').item.json.ticketId }}\",\n  \"message\": \"Votre demande a été transmise au support.\"\n}",
+        "options": {}
+      },
+      "id": "9",
+      "name": "Réponse Webhook — Humain",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Décision Support').item.json.email }}",
+        "subject": "=JAPPO — Réponse à votre demande [{{ $('Décision Support').item.json.ticketId }}]",
+        "emailType": "text",
+        "message": "=Bonjour,\n\nNous avons traité votre demande concernant JAPPO.\n\n{{ $('Décision Support').item.json.response }}\n\nRéférence : {{ $('Décision Support').item.json.ticketId }}\n\nSi vous avez besoin d'une autre assistance, vous pouvez nous contacter à nouveau.\n\nCordialement,\nL'équipe JAPPO"
+      },
+      "id": "10",
+      "name": "Email — Solution client",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        520,
+        140
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"status\": \"RESOLVED\",\n  \"ticketId\": \"{{ $('Décision Support').item.json.ticketId }}\",\n  \"message\": \"Votre demande a été traitée automatiquement.\"\n}",
+        "options": {}
+      },
+      "id": "11",
+      "name": "Réponse Webhook — Résolu",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        140
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook — Demande client": {
+      "main": [
+        [
+          {
+            "node": "Préparer + Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer + Ticket": {
+      "main": [
+        [
+          {
+            "node": "OpenRouter — Support IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter — Support IA": {
+      "main": [
+        [
+          {
+            "node": "Interpréter la réponse IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Interpréter la réponse IA": {
+      "main": [
+        [
+          {
+            "node": "Décision Support",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Décision Support": {
+      "main": [
+        [
+          {
+            "node": "Besoin humain ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Besoin humain ?": {
+      "main": [
+        [
+          {
+            "node": "Email — Confirmation client",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email — Solution client",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email — Confirmation client": {
+      "main": [
+        [
+          {
+            "node": "Email — Support JAPPO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email — Support JAPPO": {
+      "main": [
+        [
+          {
+            "node": "Réponse Webhook — Humain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email — Solution client": {
+      "main": [
+        [
+          {
+            "node": "Réponse Webhook — Résolu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "jappo-support-v2",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
